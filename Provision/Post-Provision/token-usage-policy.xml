@@ -1,0 +1,75 @@
+<policies>
+    <inbound>
+        <base />
+        <!-- Store request start time -->
+        <set-variable name="requestStartTime" value="@(DateTime.UtcNow)" />
+        <!-- Extract customer ID from subscription key or headers -->
+        <set-variable name="customerId" value="@(context.Subscription?.Name ?? context.Request.Headers.GetValueOrDefault("X-Customer-ID", "unknown"))" />
+        <!-- Extract API name and operation -->
+        <set-variable name="apiName" value="@(context.Api.Name)" />
+        <set-variable name="operationName" value="@(context.Operation.Name)" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+        <!-- Calculate call duration -->
+        <set-variable name="callDuration" value="@((DateTime.UtcNow - (DateTime)context.Variables["requestStartTime"]).TotalMilliseconds)" />
+        
+        <!-- Extract token usage from AOAI response -->
+        <choose>
+            <when condition="@(context.Response.StatusCode == 200 && context.Response.Body != null)">
+                <set-variable name="responseBody" value="@(context.Response.Body.As<JObject>(preserveContent: true))" />
+                <set-variable name="promptTokens" value="@{
+                    var body = (JObject)context.Variables["responseBody"];
+                    return body["usage"]?["prompt_tokens"]?.Value<int>() ?? 0;
+                }" />
+                <set-variable name="completionTokens" value="@{
+                    var body = (JObject)context.Variables["responseBody"];
+                    return body["usage"]?["completion_tokens"]?.Value<int>() ?? 0;
+                }" />
+                <set-variable name="totalTokens" value="@{
+                    var body = (JObject)context.Variables["responseBody"];
+                    return body["usage"]?["total_tokens"]?.Value<int>() ?? 0;
+                }" />
+                
+                <!-- Publish to Event Grid -->
+                <send-request mode="new" response-variable-name="eventGridResponse" timeout="20" ignore-error="true">
+                    <set-url>{{EVENT_GRID_ENDPOINT}}</set-url>
+                    <set-method>POST</set-method>
+                    <set-header name="Content-Type" value="application/json" />
+                    <set-header name="aeg-sas-key" value="{{EVENT_GRID_KEY}}" />
+                    <set-body>@{
+                        var eventData = new JArray();
+                        var eventObj = new JObject();
+                        eventObj["id"] = Guid.NewGuid().ToString();
+                        eventObj["eventType"] = "TokenUsage.Recorded";
+                        eventObj["subject"] = "apim/token-usage";
+                        eventObj["eventTime"] = DateTime.UtcNow.ToString("o");
+                        eventObj["dataVersion"] = "1.0";
+                        eventObj["data"] = new JObject()
+                        {
+                            ["customerId"] = (string)context.Variables["customerId"],
+                            ["apiName"] = (string)context.Variables["apiName"],
+                            ["operationName"] = (string)context.Variables["operationName"],
+                            ["callDuration"] = (double)context.Variables["callDuration"],
+                            ["promptTokens"] = (int)context.Variables["promptTokens"],
+                            ["completionTokens"] = (int)context.Variables["completionTokens"],
+                            ["totalTokens"] = (int)context.Variables["totalTokens"],
+                            ["timestamp"] = DateTime.UtcNow.ToString("o"),
+                            ["requestId"] = context.RequestId,
+                            ["subscriptionId"] = context.Subscription?.Id,
+                            ["region"] = "{{APIM_REGION}}"
+                        };
+                        eventData.Add(eventObj);
+                        return eventData.ToString();
+                    }</set-body>
+                </send-request>
+            </when>
+        </choose>
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

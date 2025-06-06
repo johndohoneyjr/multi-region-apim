@@ -1,0 +1,48 @@
+<!--
+APIM Backend Configuration Policy for OpenAI
+This policy sets up named backends for both OpenAI regions with managed identity authentication.
+Apply this at the API level to configure backends.
+-->
+<policies>
+    <inbound>
+        <base />
+        <!-- Configure OpenAI East backend -->
+        <set-backend-service id="openai-east" />
+        
+        <!-- Configure OpenAI West backend -->
+        <set-backend-service id="openai-west" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
+
+<!-- 
+Backend definitions to be created via Azure CLI or Portal:
+
+1. Create OpenAI East Backend:
+az apim backend create \
+  --service-name YOUR_APIM_NAME \
+  --resource-group YOUR_RG \
+  --backend-id openai-east \
+  --url YOUR_OPENAI_EAST_ENDPOINT \
+  --protocol http \
+  --credentials-authorization-header-name "Authorization" \
+  --credentials-authorization-header-value "Bearer {managed-identity-token}"
+
+2. Create OpenAI West Backend:
+az apim backend create \
+  --service-name YOUR_APIM_NAME \
+  --resource-group YOUR_RG \
+  --backend-id openai-west \
+  --url YOUR_OPENAI_WEST_ENDPOINT \
+  --protocol http \
+  --credentials-authorization-header-name "Authorization" \
+  --credentials-authorization-header-value "Bearer {managed-identity-token}"
+-->

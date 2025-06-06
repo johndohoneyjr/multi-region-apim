@@ -1,0 +1,23 @@
+<!--
+APIM Inbound Policy: Strips username, companyName, billingCode from query, stores for outbound use.
+Place this in your API or operation policy in APIM.
+-->
+<policies>
+    <inbound>
+        <base />
+        <!-- Extract and remove query params, store in context -->
+        <set-variable name="username" value="@(context.Request.OriginalUrl.Query.GetValueOrDefault("username", string.Empty))" />
+        <set-variable name="companyName" value="@(context.Request.OriginalUrl.Query.GetValueOrDefault("companyName", string.Empty))" />
+        <set-variable name="billingCode" value="@(context.Request.OriginalUrl.Query.GetValueOrDefault("billingCode", string.Empty))" />
+        <rewrite-uri template="@(context.Request.OriginalUrl.Path + context.Request.OriginalUrl.QueryString.ReplaceQueryParameters(new [] { "username", "companyName", "billingCode" }))" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

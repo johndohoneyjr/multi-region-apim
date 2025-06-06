@@ -1,0 +1,136 @@
+<!--
+APIM Advanced Policy: Geo-conditional access with load balancing and 429 failover
+This policy:
+1. Determines client geography and routes to nearest OpenAI region
+2. Load balances between East and West OpenAI deployments
+3. Handles 429 rate limit errors by switching to the other region
+4. Uses managed identity for authentication
+5. Strips and stores query parameters for event tracking
+
+Apply this to your OpenAI API operation in APIM.
+Replace placeholders with your actual OpenAI endpoint URLs.
+-->
+<policies>
+    <inbound>
+        <base />
+        <!-- Extract and store query parameters for event tracking -->
+        <set-variable name="username" value="@(context.Request.OriginalUrl.Query.GetValueOrDefault("username", string.Empty))" />
+        <set-variable name="companyName" value="@(context.Request.OriginalUrl.Query.GetValueOrDefault("companyName", string.Empty))" />
+        <set-variable name="billingCode" value="@(context.Request.OriginalUrl.Query.GetValueOrDefault("billingCode", string.Empty))" />
+        <rewrite-uri template="@(context.Request.OriginalUrl.Path + context.Request.OriginalUrl.QueryString.ReplaceQueryParameters(new [] { "username", "companyName", "billingCode" }))" />
+        
+        <!-- Determine client geography and set primary/secondary backends -->
+        <choose>
+            <when condition="@(context.Request.Headers.GetValueOrDefault("CF-IPCountry", "").StartsWith("US") && (context.Request.Headers.GetValueOrDefault("CF-IPCountry", "").Contains("CA") || context.Request.Headers.GetValueOrDefault("CF-IPCountry", "").Contains("TX") || context.Request.Headers.GetValueOrDefault("CF-IPCountry", "").Contains("NV")))">
+                <!-- West Coast - primary: West, secondary: East -->
+                <set-variable name="primaryBackend" value="openai-west" />
+                <set-variable name="secondaryBackend" value="openai-east" />
+                <set-variable name="primaryEndpoint" value="https://YOUR_OPENAI_WEST_ENDPOINT" />
+                <set-variable name="secondaryEndpoint" value="https://YOUR_OPENAI_EAST_ENDPOINT" />
+            </when>
+            <otherwise>
+                <!-- Default/East Coast - primary: East, secondary: West -->
+                <set-variable name="primaryBackend" value="openai-east" />
+                <set-variable name="secondaryBackend" value="openai-west" />
+                <set-variable name="primaryEndpoint" value="https://YOUR_OPENAI_EAST_ENDPOINT" />
+                <set-variable name="secondaryEndpoint" value="https://YOUR_OPENAI_WEST_ENDPOINT" />
+            </otherwise>
+        </choose>
+        
+        <!-- Set initial backend to primary -->
+        <set-backend-service base-url="@(context.Variables.GetValueOrDefault<string>("primaryEndpoint"))" />
+        
+        <!-- Add managed identity authentication -->
+        <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+        
+        <!-- Set retry attempt counter -->
+        <set-variable name="retryAttempt" value="0" />
+    </inbound>
+    <backend>
+        <retry condition="@(context.Response != null && (context.Response.StatusCode == 429 || context.Response.StatusCode >= 500) && context.Variables.GetValueOrDefault<int>("retryAttempt") < 1)" count="1" interval="1">
+            <choose>
+                <when condition="@(context.Response != null && context.Response.StatusCode == 429)">
+                    <!-- 429 rate limit - switch to secondary backend -->
+                    <set-variable name="retryAttempt" value="@(context.Variables.GetValueOrDefault<int>("retryAttempt") + 1)" />
+                    <set-backend-service base-url="@(context.Variables.GetValueOrDefault<string>("secondaryEndpoint"))" />
+                    <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+                </when>
+                <when condition="@(context.Response != null && context.Response.StatusCode >= 500)">
+                    <!-- Server error - switch to secondary backend -->
+                    <set-variable name="retryAttempt" value="@(context.Variables.GetValueOrDefault<int>("retryAttempt") + 1)" />
+                    <set-backend-service base-url="@(context.Variables.GetValueOrDefault<string>("secondaryEndpoint"))" />
+                    <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+                </when>
+            </choose>
+            <forward-request />
+        </retry>
+        <forward-request />
+    </backend>
+    <outbound>
+        <base />
+        <!-- Add region info to response headers for debugging -->
+        <set-header name="X-APIM-Primary-Backend" exists-action="override">
+            <value>@(context.Variables.GetValueOrDefault<string>("primaryBackend"))</value>
+        </set-header>
+        <set-header name="X-APIM-Retry-Attempt" exists-action="override">
+            <value>@(context.Variables.GetValueOrDefault<int>("retryAttempt").ToString())</value>
+        </set-header>
+        
+        <!-- Extract token usage from OpenAI response -->
+        <set-variable name="tokensUsed" value="@{
+            try {
+                var responseBody = context.Response.Body.As<JObject>(preserveContent: true);
+                return responseBody["usage"]["total_tokens"].ToString();
+            }
+            catch {
+                return "0";
+            }
+        }" />
+        
+        <!-- Compose event grid payload for token usage tracking -->
+        <set-variable name="eventGridPayload" value='@{
+            var eventData = new JObject();
+            eventData["userId"] = context.Request.Headers.GetValueOrDefault("x-user-id", string.Empty);
+            eventData["apiId"] = context.Api.Id;
+            eventData["tokensUsed"] = context.Variables.GetValueOrDefault<string>("tokensUsed");
+            eventData["username"] = context.Variables.GetValueOrDefault<string>("username");
+            eventData["companyName"] = context.Variables.GetValueOrDefault<string>("companyName");
+            eventData["billingCode"] = context.Variables.GetValueOrDefault<string>("billingCode");
+            eventData["region"] = context.Variables.GetValueOrDefault<string>("primaryBackend");
+            eventData["failoverOccurred"] = context.Variables.GetValueOrDefault<int>("retryAttempt") > 0;
+            eventData["timestamp"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            
+            var eventGridEvent = new JArray();
+            var eventItem = new JObject();
+            eventItem["eventType"] = "APIM.TokenUsage";
+            eventItem["subject"] = "apim/tokenusage";
+            eventItem["data"] = eventData;
+            eventItem["id"] = Guid.NewGuid().ToString();
+            eventItem["eventTime"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            eventItem["dataVersion"] = "1.0";
+            eventGridEvent.Add(eventItem);
+            
+            return eventGridEvent.ToString();
+        }' />
+        
+        <!-- Send event to Event Grid -->
+        <send-request mode="new" response-variable-name="eventGridResponse" timeout="10" ignore-error="true">
+            <set-url>YOUR_EVENT_GRID_TOPIC_ENDPOINT/api/events</set-url>
+            <set-method>POST</set-method>
+            <set-header name="aeg-sas-key" exists-action="override">
+                <value>YOUR_EVENT_GRID_KEY</value>
+            </set-header>
+            <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+            </set-header>
+            <set-body>@(context.Variables["eventGridPayload"])</set-body>
+        </send-request>
+    </outbound>
+    <on-error>
+        <base />
+        <!-- Log error details -->
+        <trace source="APIM-OpenAI-Policy" severity="error">
+            <message>@($"Error in OpenAI policy: {context.LastError.Message}")</message>
+        </trace>
+    </on-error>
+</policies>

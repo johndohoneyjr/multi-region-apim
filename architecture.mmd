@@ -1,0 +1,65 @@
+graph TB
+    %% Client Layer
+    Client[Client Applications]
+    
+    %% Traffic Management Layer
+    TM[Traffic Manager<br/>apim-poc-tm]
+    
+    %% API Management Layer
+    subgraph "East US Region"
+        APIM_E[APIM East<br/>apim-poc-apim-east]
+        AOAI_E[Azure OpenAI East<br/>gpt-4o & text-embedding-ada-002]
+        FUNC_E[Function App East<br/>apim-poc-func-east]
+        STORAGE_E[Storage Account East]
+    end
+    
+    subgraph "West US Region"
+        APIM_W[APIM West<br/>apim-poc-apim-west]
+        AOAI_W[Azure OpenAI West<br/>gpt-4o & text-embedding-ada-002]
+        FUNC_W[Function App West<br/>apim-poc-func-west]
+        STORAGE_W[Storage Account West]
+    end
+    
+    %% Shared Services Layer
+    subgraph "Shared Services (East US)"
+        EG[Event Grid Topic<br/>apim-poc-eg-topic]
+        REDIS[Redis Cache<br/>apim-poc-redis]
+        TOKEN_FUNC[Token Processor Function<br/>apim-poc-token-processor]
+    end
+    
+    %% Connections
+    Client --> TM
+    TM -.->|Performance Routing| APIM_E
+    TM -.->|Performance Routing| APIM_W
+    
+    %% Regional Connections
+    APIM_E -->|Managed Identity| AOAI_E
+    APIM_E -->|Managed Identity| AOAI_W
+    APIM_E --> FUNC_E
+    FUNC_E --> STORAGE_E
+    
+    APIM_W -->|Managed Identity| AOAI_W
+    APIM_W -->|Managed Identity| AOAI_E
+    APIM_W --> FUNC_W
+    FUNC_W --> STORAGE_W
+    
+    %% Event Flow
+    APIM_E -.->|API Events| EG
+    APIM_W -.->|API Events| EG
+    EG --> TOKEN_FUNC
+    TOKEN_FUNC --> REDIS
+    
+    %% Failover Connections (429 handling)
+    APIM_E -.->|429 Failover| AOAI_W
+    APIM_W -.->|429 Failover| AOAI_E
+    
+    %% Styling
+    classDef primary fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef secondary fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef shared fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef client fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    
+    class APIM_E,APIM_W,AOAI_E,AOAI_W primary
+    class FUNC_E,FUNC_W,STORAGE_E,STORAGE_W secondary
+    class EG,REDIS,TOKEN_FUNC,TM shared
+    class Client client

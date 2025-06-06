@@ -1,0 +1,4 @@
+# Requirements for Azure Functions
+azure-functions
+redis
+azure-eventgrid

@@ -1,0 +1,42 @@
+<!--
+APIM Outbound Policy: Sends event to Event Grid with User ID, API ID, Tokens used, username, companyName, billingCode.
+Includes circuit breaker logic for backend failures.
+Place this in your API or operation policy in APIM.
+-->
+<policies>
+    <inbound>
+        <base />
+    </inbound>
+    <backend>
+        <base />
+        <!-- Circuit breaker: trip after 3 failures in 60s, reset after 120s -->
+        <circuit-breaker threshold="3" interval="60" break-duration="120" />
+    </backend>
+    <outbound>
+        <base />
+        <!-- Compose event grid payload -->
+        <set-variable name="eventGridPayload" value='{
+            "userId": "@(context.Request.Headers.GetValueOrDefault("x-user-id", string.Empty))",
+            "apiId": "@(context.Api.Id)",
+            "tokensUsed": "@(context.Response.Headers.GetValueOrDefault("x-tokens-used", "0"))",
+            "username": "@(context.Variables.GetValueOrDefault("username", string.Empty))",
+            "companyName": "@(context.Variables.GetValueOrDefault("companyName", string.Empty))",
+            "billingCode": "@(context.Variables.GetValueOrDefault("billingCode", string.Empty))"
+        }' />
+        <!-- Send event to Event Grid (webhook) -->
+        <send-request mode="new" response-variable-name="eventGridResponse" timeout="10" ignore-error="true">
+            <set-url>https://YOUR_EVENT_GRID_TOPIC_ENDPOINT/api/events</set-url>
+            <set-method>POST</set-method>
+            <set-header name="aeg-sas-key" exists-action="override">
+                <value>YOUR_EVENT_GRID_KEY</value>
+            </set-header>
+            <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+            </set-header>
+            <set-body>@(context.Variables["eventGridPayload"])</set-body>
+        </send-request>
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
